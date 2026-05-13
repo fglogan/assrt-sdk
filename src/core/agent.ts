@@ -251,7 +251,15 @@ When the page has loading states, streaming AI responses, or async content:
 1. Use wait_for_stable to wait until the DOM stops changing
 2. This is better than wait with a fixed time because it adapts to actual load speed
 3. Use it after submitting forms, sending chat messages, or triggering any async operation
-4. Then call snapshot to see the final state`;
+4. Then call snapshot to see the final state
+
+## Assertion Coverage (CRITICAL — non-negotiable)
+Every line in the scenario steps that starts with "Verify", "Check", "Assert", "Confirm", or "Ensure" is a MANDATORY assertion. You MUST produce exactly one assert tool call for each such line.
+- Do NOT silently merge two bullets into one assert call. One bullet, one assert.
+- Do NOT skip a bullet because it seems redundant, obvious, or hard to check. If verifying it is genuinely impossible (e.g. the element does not exist on the page), make an assert call with passed=false and evidence describing what was missing. Failure to verify is a FAILED assertion, not a reason to omit.
+- Do NOT add extra assertions that were not in the scenario steps. Cover exactly what was asked for, no more.
+- Before calling complete_scenario, mentally re-read each "Verify"/"Check"/"Assert"/"Confirm"/"Ensure" line in the scenario and confirm you have made one corresponding assert call. If any are missing, make them now.
+- The description field of each assert call MUST closely match the wording of the bullet it covers, so a reviewer can match assertions to bullets one-to-one.`;
 
 const DISCOVERY_SYSTEM_PROMPT = `You are a QA engineer generating quick test cases for an AI browser agent that just landed on a new page. The agent can click, type, scroll, and verify visible text.
 
@@ -716,7 +724,7 @@ export class TestAgent {
       ? `\n\n## Test Variables\nThe following variables were substituted into the test plan:\n${Object.entries(variables).map(([k, v]) => `- {{${k}}} = "${v}"`).join("\n")}`
       : "";
 
-    const userPrompt = `${contextInfo}${emailInfo}\n\nCurrent page accessibility tree:\n${initialSnapshot}\n\n---\nExecute this test scenario:\n**${scenarioName}**\n${scenarioSteps}${passCriteriaSection}${variablesSection}\n\nIMPORTANT: Use snapshot refs (e.g. ref="e5") for reliable element targeting. Call snapshot before each interaction to get fresh refs.\nIf login/signup needs email, use create_temp_email first.\n\nAnalyze the page, act, make assertions, call complete_scenario when done.`;
+    const userPrompt = `${contextInfo}${emailInfo}\n\nCurrent page accessibility tree:\n${initialSnapshot}\n\n---\nExecute this test scenario:\n**${scenarioName}**\n${scenarioSteps}${passCriteriaSection}${variablesSection}\n\nIMPORTANT: Use snapshot refs (e.g. ref="e5") for reliable element targeting. Call snapshot before each interaction to get fresh refs.\nIf login/signup needs email, use create_temp_email first.\n\nMANDATORY assertion coverage: every bullet above that starts with "Verify", "Check", "Assert", "Confirm", or "Ensure" requires exactly one corresponding assert tool call before you call complete_scenario. Do not silently skip any. If a bullet is impossible to verify (e.g. the element is missing), call assert with passed=false and explain what was missing as evidence. Re-read the bullets before completing to confirm coverage.\n\nAnalyze the page, act, make assertions, call complete_scenario when done.`;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const messages: any[] = this.provider === "gemini"
@@ -1122,6 +1130,44 @@ export class TestAgent {
 
     if (!completed) scenarioSummary = `Reached max steps (${MAX_STEPS_PER_SCENARIO})`;
 
-    return { name: scenarioName, passed: scenarioPassed, steps, assertions, summary: scenarioSummary, duration: Date.now() - startTime };
+    // Assertion coverage check: extract every Verify/Check/Assert/Confirm/Ensure bullet from the
+    // scenario steps and confirm the agent produced at least one assert call whose description
+    // shares enough wording. Any bullet without coverage is reported in droppedAssertions and
+    // forces the scenario to fail.
+    const verifyBulletRegex = /^[\s\-*\d.()]*(?:Verify|Check|Assert|Confirm|Ensure)\b[^\n]*/gim;
+    const verifyBullets: string[] = (scenarioSteps.match(verifyBulletRegex) || [])
+      .map((s) => s.replace(/^[\s\-*\d.()]+/, "").trim())
+      .filter((s) => s.length > 0);
+    const assertionDescriptions = assertions.map((a) => a.description.toLowerCase());
+    const normalize = (s: string) =>
+      s.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter((w) => w.length > 3);
+    const droppedAssertions: string[] = [];
+    for (const bullet of verifyBullets) {
+      const bulletKeywords = normalize(bullet);
+      if (bulletKeywords.length === 0) continue;
+      const covered = assertionDescriptions.some((desc) => {
+        const matched = bulletKeywords.filter((kw) => desc.includes(kw)).length;
+        // Require at least 2 distinct content keywords (or all of them if the bullet is short) to match.
+        return matched >= Math.min(2, bulletKeywords.length);
+      });
+      if (!covered) droppedAssertions.push(bullet);
+    }
+    if (droppedAssertions.length > 0) {
+      scenarioPassed = false;
+      const dropMsg = `Agent skipped ${droppedAssertions.length} mandatory verify bullet${droppedAssertions.length === 1 ? "" : "s"} (no matching assert call): ${droppedAssertions.slice(0, 3).join(" | ")}${droppedAssertions.length > 3 ? " …" : ""}`;
+      scenarioSummary = scenarioSummary ? `${scenarioSummary} | ${dropMsg}` : dropMsg;
+      console.error(JSON.stringify({ event: "agent.coverage.dropped", scenario: scenarioName, count: droppedAssertions.length, bullets: droppedAssertions }));
+    }
+
+    return {
+      name: scenarioName,
+      passed: scenarioPassed,
+      steps,
+      assertions,
+      summary: scenarioSummary,
+      duration: Date.now() - startTime,
+      expectedAssertions: verifyBullets.length,
+      ...(droppedAssertions.length > 0 ? { droppedAssertions } : {}),
+    };
   }
 }
