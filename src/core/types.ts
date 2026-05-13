@@ -23,6 +23,11 @@ export interface ScenarioResult {
   assertions: TestAssertion[];
   summary: string;
   duration: number;
+  /** Bullets in the scenario steps that started with Verify/Check/Assert/Confirm/Ensure but
+   *  produced no corresponding assert call from the agent. Empty means full coverage. */
+  droppedAssertions?: string[];
+  /** Total number of mandatory verify bullets found in the scenario steps. */
+  expectedAssertions?: number;
 }
 
 export interface TestReport {
