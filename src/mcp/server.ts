@@ -357,8 +357,9 @@ server.tool(
     keepBrowserOpen: z.boolean().optional().describe("When true, leave the browser window open after the test finishes instead of closing it. Useful for manual inspection or follow-up testing. Defaults to false."),
     extension: z.boolean().optional().describe("When true, connect to your existing Chrome browser instance instead of launching a new one. Uses Playwright's --extension mode via Chrome DevTools Protocol."),
     extensionToken: z.string().optional().describe("Playwright extension token for bypassing the Chrome approval dialog. Required on first use of extension mode. The token is saved automatically for future runs."),
+    managed: z.boolean().optional().describe("When true, launch a managed Google Chrome with --remote-debugging-port and attach Playwright MCP via CDP. Required when this run will use assrt_seed_* tools to inject cookies/localStorage/IndexedDB. Defaults to false (uses Playwright's bundled Chromium with no externally reachable CDP)."),
   },
-  async ({ url: urlParam, plan, scenarioId, scenarioName, passCriteria: passCriteriaParam, variables: variablesParam, timeout, stopOnFirstFailure, viewport, tags: tagsParam, model, autoOpenPlayer, headed, isolated, keepBrowserOpen, extension, extensionToken }) => {
+  async ({ url: urlParam, plan, scenarioId, scenarioName, passCriteria: passCriteriaParam, variables: variablesParam, timeout, stopOnFirstFailure, viewport, tags: tagsParam, model, autoOpenPlayer, headed, isolated, keepBrowserOpen, extension, extensionToken, managed }) => {
     // Mutable copies of scenario metadata (may be inherited from stored scenario)
     let passCriteria = passCriteriaParam;
     let variables = variablesParam as Record<string, string> | undefined;
@@ -518,7 +519,15 @@ server.tool(
       }
     }
     const extensionResolved = extension ?? false;
-    const agent = new TestAgent(credential.token, emit, model, "anthropic", null, agentMode, credential.type, videoDir, headedResolved, isolatedResolved, agentMode === "local" ? sharedBrowser! : undefined, extensionResolved, extensionToken);
+    // Managed Chrome mode: opt-in via `managed: true` param, ASSRT_MANAGED_CHROME env, or
+    // implicit when a managed Chrome was already spawned earlier in this MCP session
+    // (e.g. by a previous seed_* call). When managed=true, Playwright MCP attaches via
+    // --cdp-endpoint to the managed Chrome instead of launching its own Chromium.
+    const managedResolved =
+      managed ??
+      (process.env.ASSRT_MANAGED_CHROME === "1" || process.env.ASSRT_MANAGED_CHROME === "true") ??
+      !!sharedBrowser?.getCdpUrl();
+    const agent = new TestAgent(credential.token, emit, model, "anthropic", null, agentMode, credential.type, videoDir, headedResolved, isolatedResolved, agentMode === "local" ? sharedBrowser! : undefined, extensionResolved, extensionToken, managedResolved);
 
     // Ensure the browser is launched before starting video recording.
     // agent.run() calls launchLocal() internally, but we need the browser connected
@@ -526,7 +535,7 @@ server.tool(
     let videoFilesBefore: string[] = [];
     if (agentMode === "local" && sharedBrowser && !sharedBrowser.isConnected) {
       try {
-        await sharedBrowser.launchLocal(videoDir, headedResolved, isolatedResolved, extensionResolved, extensionToken);
+        await sharedBrowser.launchLocal(videoDir, headedResolved, isolatedResolved, extensionResolved, extensionToken, managedResolved);
       } catch (err) {
         if (err instanceof ExtensionTokenRequired) {
           return { content: [{ type: "text" as const, text: JSON.stringify({
@@ -972,18 +981,21 @@ Please diagnose this failure and provide a corrected test scenario.`;
 // Filter format: comma-separated host substrings, e.g. "github.com,linear.app".
 //   Highly recommended — cookies/IDB are auth secrets, copy only what you need.
 
-function resolveCdpUrlOrError(explicit?: string): { cdpUrl: string } | { error: string } {
-  if (explicit && explicit.trim()) return { cdpUrl: explicit.trim() };
-  const fromBrowser = sharedBrowser?.getCdpUrl();
-  if (fromBrowser) return { cdpUrl: fromBrowser };
-  return {
-    error:
-      "No CDP endpoint available. Seeding requires a browser reachable over CDP. " +
-      "Either set the ASSRT_CDP_ENDPOINT env var (e.g. http://127.0.0.1:9655) to a Chrome " +
-      "launched with --remote-debugging-port, or pass cdpUrl explicitly. " +
-      "Note: assrt_test's default Playwright MCP launch does not expose CDP; managed-Chrome " +
-      "mode is not yet wired in.",
-  };
+/** Resolve a CDP URL for seeding. Priority:
+ *   1. Explicit `cdpUrl` argument (caller-provided).
+ *   2. Existing managed Chrome (or ASSRT_CDP_ENDPOINT env), via sharedBrowser.getCdpUrl().
+ *   3. Auto-spawn a managed Chrome and return its CDP URL.
+ *
+ * The auto-spawn case ensures `assrt_seed_*` "just works" without the caller having to
+ * pre-launch anything. The spawned Chrome persists for the lifetime of the MCP process
+ * so subsequent seed calls (and any later assrt_test with managed=true) reuse it. */
+async function resolveCdpUrl(explicit?: string): Promise<{ cdpUrl: string; spawned: boolean }> {
+  if (explicit && explicit.trim()) return { cdpUrl: explicit.trim(), spawned: false };
+  if (!sharedBrowser) sharedBrowser = new McpBrowserManager();
+  const existing = sharedBrowser.getCdpUrl();
+  if (existing) return { cdpUrl: existing, spawned: false };
+  const handle = await sharedBrowser.ensureManagedChrome();
+  return { cdpUrl: handle.cdpUrl, spawned: !handle.reused };
 }
 
 function registerSeedTool(kind: SeedKind, opts: {
@@ -1010,11 +1022,17 @@ function registerSeedTool(kind: SeedKind, opts: {
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async (args: any) => {
-      const resolved = resolveCdpUrlOrError(args.cdpUrl);
-      if ("error" in resolved) {
-        return { content: [{ type: "text" as const, text: JSON.stringify({ ok: false, error: resolved.error }, null, 2) }], isError: true };
-      }
       const t0 = Date.now();
+      let resolved: { cdpUrl: string; spawned: boolean };
+      try {
+        resolved = await resolveCdpUrl(args.cdpUrl);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ ok: false, error: `Failed to acquire CDP endpoint: ${message}` }, null, 2) }],
+          isError: true,
+        };
+      }
       const result = await runSeed(kind, {
         source: args.source,
         cdpUrl: resolved.cdpUrl,
@@ -1026,6 +1044,7 @@ function registerSeedTool(kind: SeedKind, opts: {
         source_profile: String(args.source).slice(0, 60),
         ok: result.ok,
         duration_s: +((Date.now() - t0) / 1000).toFixed(1),
+        chrome_spawned: resolved.spawned,
         source: "mcp",
       });
       return {
@@ -1035,6 +1054,7 @@ function registerSeedTool(kind: SeedKind, opts: {
             ok: result.ok,
             kind: result.kind,
             cdpUrl: resolved.cdpUrl,
+            spawnedManagedChrome: resolved.spawned,
             returncode: result.returncode,
             stdout: result.stdout,
             stderr: result.stderr,
