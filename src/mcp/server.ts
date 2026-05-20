@@ -26,6 +26,7 @@ import { fetchScenario, saveScenario, updateScenario, saveScenarioRun, uploadArt
 import { writeScenarioFile, writeResultsFile, readScenarioFile, PATHS } from "../core/scenario-files";
 import type { TestReport, ScenarioResult } from "../core/types";
 import { trackEvent, shutdownTelemetry } from "../core/telemetry";
+import { seed as runSeed, type SeedKind } from "../core/seed";
 
 // ── Singleton browser instance (reused across assrt_test calls) ──
 let sharedBrowser: McpBrowserManager | null = null;
@@ -952,6 +953,129 @@ Please diagnose this failure and provide a corrected test scenario.`;
     };
   }
 );
+
+// ── Seeding tools (cookies / localStorage / IndexedDB) ──
+//
+// Import browser state from a user's local profile (Chrome/Arc/Brave/Edge) into
+// the test browser. Wraps the `ai-browser-profile` Python package. Requires the
+// target browser to be reachable at a CDP HTTP endpoint, which means one of:
+//   - ASSRT_CDP_ENDPOINT env var is set (e.g. when running inside the E2B
+//     sandbox where startup.sh launches Chromium with --remote-debugging-port),
+//   - or the caller passes an explicit `cdpUrl` argument.
+//
+// In the default Playwright MCP path (assrt_test launches headless Chromium with
+// no external port), seeding is not yet supported and the tool returns a clear
+// error pointing the caller at the supported modes.
+//
+// Source profile spec format: "<browser>:<profile>", e.g. "chrome:Default",
+//   "arc:Default", "brave:Profile 1". Browsers supported: chrome, arc, brave, edge.
+// Filter format: comma-separated host substrings, e.g. "github.com,linear.app".
+//   Highly recommended — cookies/IDB are auth secrets, copy only what you need.
+
+function resolveCdpUrlOrError(explicit?: string): { cdpUrl: string } | { error: string } {
+  if (explicit && explicit.trim()) return { cdpUrl: explicit.trim() };
+  const fromBrowser = sharedBrowser?.getCdpUrl();
+  if (fromBrowser) return { cdpUrl: fromBrowser };
+  return {
+    error:
+      "No CDP endpoint available. Seeding requires a browser reachable over CDP. " +
+      "Either set the ASSRT_CDP_ENDPOINT env var (e.g. http://127.0.0.1:9655) to a Chrome " +
+      "launched with --remote-debugging-port, or pass cdpUrl explicitly. " +
+      "Note: assrt_test's default Playwright MCP launch does not expose CDP; managed-Chrome " +
+      "mode is not yet wired in.",
+  };
+}
+
+function registerSeedTool(kind: SeedKind, opts: {
+  name: string;
+  description: string;
+  filterArg: { name: string; description: string };
+  supportsLoadWait: boolean;
+}) {
+  server.tool(
+    opts.name,
+    opts.description,
+    {
+      source: z.string().describe(
+        "Source profile spec: '<browser>:<profile>'. Browsers: chrome, arc, brave, edge. " +
+        "Examples: 'chrome:Default', 'arc:Default', 'brave:Profile 1'. " +
+        "The source browser must be CLOSED — its on-disk storage files are locked while it runs.",
+      ),
+      [opts.filterArg.name]: z.string().optional().describe(opts.filterArg.description),
+      ...(opts.supportsLoadWait
+        ? { loadWait: z.number().optional().describe("Seconds to wait after opening each tab before injecting (default 4). Increase for slow-loading origins.") }
+        : {}),
+      cdpUrl: z.string().optional().describe("Override the target CDP HTTP endpoint (e.g. http://127.0.0.1:9655). Defaults to ASSRT_CDP_ENDPOINT or the managed browser's endpoint."),
+      verbose: z.boolean().optional().describe("Verbose CLI output (passes -v)."),
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async (args: any) => {
+      const resolved = resolveCdpUrlOrError(args.cdpUrl);
+      if ("error" in resolved) {
+        return { content: [{ type: "text" as const, text: JSON.stringify({ ok: false, error: resolved.error }, null, 2) }], isError: true };
+      }
+      const t0 = Date.now();
+      const result = await runSeed(kind, {
+        source: args.source,
+        cdpUrl: resolved.cdpUrl,
+        filter: args[opts.filterArg.name],
+        loadWait: args.loadWait,
+        verbose: args.verbose,
+      });
+      trackEvent(`assrt_seed_${kind}`, {
+        source: String(args.source).slice(0, 60),
+        ok: result.ok,
+        duration_s: +((Date.now() - t0) / 1000).toFixed(1),
+        source_tool: "mcp",
+      });
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            ok: result.ok,
+            kind: result.kind,
+            cdpUrl: resolved.cdpUrl,
+            returncode: result.returncode,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            ...(result.error ? { error: result.error } : {}),
+          }, null, 2),
+        }],
+        ...(result.ok ? {} : { isError: true }),
+      };
+    },
+  );
+}
+
+registerSeedTool("cookies", {
+  name: "assrt_seed_cookies",
+  description: "Import cookies from a local browser profile (Chrome/Arc/Brave/Edge) into the test browser via CDP. Use to load a user's logged-in session into the test browser before assrt_test. Strongly recommended to scope with `domains` — cookies are auth secrets.",
+  filterArg: {
+    name: "domains",
+    description: "Comma-separated host_key substrings to include (e.g. 'github.com,linear.app'). Omit to copy ALL cookies (not recommended).",
+  },
+  supportsLoadWait: false,
+});
+
+registerSeedTool("localstorage", {
+  name: "assrt_seed_localstorage",
+  description: "Import localStorage from a local browser profile into the test browser. Opens a tab per origin in the test browser, runs localStorage.setItem() via CDP, closes the tab. Use for sites that store auth/state in localStorage (ChatGPT, Notion, Linear, X.com).",
+  filterArg: {
+    name: "origins",
+    description: "Comma-separated host substrings (e.g. 'chatgpt.com,notion.so'). Omit to copy ALL origins (not recommended).",
+  },
+  supportsLoadWait: true,
+});
+
+registerSeedTool("indexeddb", {
+  name: "assrt_seed_indexeddb",
+  description: "Import IndexedDB databases from a local browser profile into the test browser. For each origin: opens a tab, lets the page bootstrap its IDB schema, then replays records via CDP. Use for sites that store auth/session/sync state in IDB (Linear, Figma, Slack web, Excalidraw, Notion offline).",
+  filterArg: {
+    name: "origins",
+    description: "Comma-separated host substrings (e.g. 'linear.app,figma.com'). Omit to copy ALL origins with IDB data (not recommended).",
+  },
+  supportsLoadWait: true,
+});
 
 // ── Tool: assrt_analyze_video (only registered when GEMINI_API_KEY is available) ──
 
