@@ -8,6 +8,12 @@
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Client = any;
 
+import {
+  launchManagedChrome,
+  type ManagedChromeHandle,
+  type ManagedChromeOptions,
+} from "./managed-chrome";
+
 /** Thrown when extension mode is requested but no token is available. */
 export class ExtensionTokenRequired extends Error {
   constructor() {
@@ -137,15 +143,33 @@ export class McpBrowserManager {
 
   /** CDP HTTP endpoint of the target browser (e.g. "http://127.0.0.1:9655"), if known.
    *  Populated when launchLocal() attaches to an externally-launched Chrome via --cdp-endpoint,
-   *  or when a future managed-Chrome path launches its own Chrome. Used by seeding tools to
+   *  or when ensureManagedChrome() launches its own Chrome. Used by seeding tools to
    *  inject cookies/localStorage/IndexedDB via ai-browser-profile.
    *  Returns null when the browser was launched in Playwright's internal-Chromium mode (no
    *  externally reachable CDP). */
   private cdpUrl: string | null = null;
+  /** Handle to a Chrome we spawned ourselves (managed mode). When non-null, we own its lifecycle
+   *  and must kill it on close(). When null, either Playwright owns the browser (internal Chromium)
+   *  or we attached to a Chrome someone else launched (no kill on our part). */
+  private managedChrome: ManagedChromeHandle | null = null;
+
   getCdpUrl(): string | null {
+    if (this.managedChrome) return this.managedChrome.cdpUrl;
     if (this.cdpUrl) return this.cdpUrl;
     const env = process.env.ASSRT_CDP_ENDPOINT?.trim();
     return env || null;
+  }
+
+  /** Spawn or attach to a managed Chrome with an externally reachable CDP endpoint.
+   *  Idempotent: a subsequent call with a healthy managedChrome returns the existing one.
+   *  After this resolves, getCdpUrl() returns a valid endpoint and seeding tools can inject. */
+  async ensureManagedChrome(opts?: ManagedChromeOptions): Promise<ManagedChromeHandle> {
+    if (this.managedChrome) {
+      // TODO: liveness probe — if dead, relaunch. For now trust the handle.
+      return this.managedChrome;
+    }
+    this.managedChrome = await launchManagedChrome(opts);
+    return this.managedChrome;
   }
 
   /** The stdio transport for the local Playwright MCP process. */
@@ -268,7 +292,7 @@ export class McpBrowserManager {
   }
 
   /** @returns true if an existing browser was reused, false if a new one was launched. */
-  async launchLocal(videoDir?: string, headed?: boolean, isolated?: boolean, extension?: boolean, extensionToken?: string): Promise<boolean> {
+  async launchLocal(videoDir?: string, headed?: boolean, isolated?: boolean, extension?: boolean, extensionToken?: string, managed?: boolean): Promise<boolean> {
     // Reuse existing browser connection only if it's actually responsive.
     // A stale client (e.g. the spawning subprocess died, or Chrome wedged on
     // about:blank) would otherwise cause snapshots against a dead page.
@@ -308,16 +332,25 @@ export class McpBrowserManager {
 
     const args = [cliPath, "--viewport-size", "1600x900", "--output-mode", "file", "--output-dir", outputDir, "--caps", "devtools"];
 
-    // CDP-attach mode: when ASSRT_CDP_ENDPOINT is set (e.g. inside the E2B
-    // sandbox, where startup.sh launches Chromium with --remote-debugging-port=9222
-    // under Xvfb), attach the spawned Playwright MCP to that already-running
-    // Chromium. Without this, Playwright MCP launches its own private headless
-    // Chromium, which the sandbox's /screencast and /vnc endpoints can't see —
-    // so the agent's navigation is invisible to the user's live view.
-    // Matches appmaker's `--cdp-endpoint` pattern (appmaker/docker/e2b/files/opt/startup.sh).
+    // CDP-attach mode: when an external Chrome with --remote-debugging-port is
+    // available, attach the spawned Playwright MCP to it instead of letting
+    // Playwright launch its own private Chromium. Sources for the CDP URL, in
+    // priority order:
+    //   1. Existing managed Chrome we spawned earlier (this.managedChrome.cdpUrl).
+    //   2. `managed: true` param — spawns a managed Chrome now and uses its URL.
+    //      Required for seeding cookies/localStorage/IndexedDB (those tools inject
+    //      via CDP HTTP, which Playwright's internal Chromium doesn't expose).
+    //   3. ASSRT_CDP_ENDPOINT env var — for the E2B sandbox path where
+    //      startup.sh launches Chromium with --remote-debugging-port=9222 under Xvfb.
+    //
     // Profile/headless/isolated flags are mutually exclusive with --cdp-endpoint
     // so we short-circuit the rest of the launch-mode logic when CDP is set.
-    const cdpEndpoint = process.env.ASSRT_CDP_ENDPOINT;
+    let cdpEndpoint: string | undefined = this.managedChrome?.cdpUrl;
+    if (!cdpEndpoint && managed) {
+      const handle = await this.ensureManagedChrome({ headed });
+      cdpEndpoint = handle.cdpUrl;
+    }
+    if (!cdpEndpoint) cdpEndpoint = process.env.ASSRT_CDP_ENDPOINT?.trim() || undefined;
 
     // Extension token resolution (needed before spawning)
     let resolvedExtensionToken: string | null = null;
@@ -748,6 +781,18 @@ export class McpBrowserManager {
         /* */
       }
       this.client = null;
+    }
+
+    // Shut down managed Chrome last so seeding tools that hold the handle don't
+    // race against close. No-op when reused=true (we attached to someone else's Chrome).
+    if (this.managedChrome) {
+      try {
+        await this.managedChrome.close();
+        console.error(`[browser] managed Chrome stopped (pid=${this.managedChrome.pid})`);
+      } catch (err) {
+        console.error(`[browser] managed Chrome close error: ${(err as Error).message}`);
+      }
+      this.managedChrome = null;
     }
   }
 }
