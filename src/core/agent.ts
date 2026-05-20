@@ -420,7 +420,7 @@ export class TestAgent {
 
     let browserReused = false;
     this.emit("status", { message: this.extension ? "Connecting to existing Chrome..." : "Launching local browser..." });
-    browserReused = await this.browser.launchLocal(this.videoDir || undefined, this.headed, this.isolated, this.extension, this.extensionToken);
+    browserReused = await this.browser.launchLocal(this.videoDir || undefined, this.headed, this.isolated, this.extension, this.extensionToken, this.managed);
     const launchMs = Date.now() - startTime;
     console.error(JSON.stringify({ event: "agent.browser.launched", durationMs: launchMs, ts: new Date().toISOString() }));
     this.emit("status", { message: "Browser launched via Playwright MCP" });
