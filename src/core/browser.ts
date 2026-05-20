@@ -135,6 +135,19 @@ export class McpBrowserManager {
   /** Get the Playwright MCP output directory path. */
   getOutputDir(): string | null { return this.outputDir; }
 
+  /** CDP HTTP endpoint of the target browser (e.g. "http://127.0.0.1:9655"), if known.
+   *  Populated when launchLocal() attaches to an externally-launched Chrome via --cdp-endpoint,
+   *  or when a future managed-Chrome path launches its own Chrome. Used by seeding tools to
+   *  inject cookies/localStorage/IndexedDB via ai-browser-profile.
+   *  Returns null when the browser was launched in Playwright's internal-Chromium mode (no
+   *  externally reachable CDP). */
+  private cdpUrl: string | null = null;
+  getCdpUrl(): string | null {
+    if (this.cdpUrl) return this.cdpUrl;
+    const env = process.env.ASSRT_CDP_ENDPOINT?.trim();
+    return env || null;
+  }
+
   /** The stdio transport for the local Playwright MCP process. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private transport: any = null;
