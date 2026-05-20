@@ -1023,10 +1023,10 @@ function registerSeedTool(kind: SeedKind, opts: {
         verbose: args.verbose,
       });
       trackEvent(`assrt_seed_${kind}`, {
-        source: String(args.source).slice(0, 60),
+        source_profile: String(args.source).slice(0, 60),
         ok: result.ok,
         duration_s: +((Date.now() - t0) / 1000).toFixed(1),
-        source_tool: "mcp",
+        source: "mcp",
       });
       return {
         content: [{
