@@ -346,6 +346,9 @@ export class TestAgent {
   private extension = false;
   /** Token for Playwright extension mode (bypasses Chrome approval dialog). */
   private extensionToken?: string;
+  /** When true, launch a managed Chrome with --remote-debugging-port and attach Playwright MCP
+   *  via --cdp-endpoint. Required when this run will also call seeding tools that inject via CDP. */
+  private managed = false;
 
   /** In-flight run state. Lets callers recover partial results if Promise.race rejects on timeout. */
   private currentRun: { url: string; startTime: number; results: ScenarioResult[] } | null = null;
@@ -364,7 +367,7 @@ export class TestAgent {
     };
   }
 
-  constructor(apiKey: string, emit: EmitFn, model?: string, provider?: string, broadcastFrame?: ((jpeg: Buffer) => void) | null, mode?: AgentMode, authType?: "apiKey" | "oauth", videoDir?: string, headed?: boolean, isolated?: boolean, browser?: McpBrowserManager, extension?: boolean, extensionToken?: string) {
+  constructor(apiKey: string, emit: EmitFn, model?: string, provider?: string, broadcastFrame?: ((jpeg: Buffer) => void) | null, mode?: AgentMode, authType?: "apiKey" | "oauth", videoDir?: string, headed?: boolean, isolated?: boolean, browser?: McpBrowserManager, extension?: boolean, extensionToken?: string, managed?: boolean) {
     this.provider = (provider === "gemini" ? "gemini" : "anthropic") as Provider;
     this.browser = browser || new McpBrowserManager();
     this.emit = emit;
@@ -375,6 +378,7 @@ export class TestAgent {
     this.isolated = !!isolated;
     this.extension = !!extension;
     this.extensionToken = extensionToken;
+    this.managed = !!managed;
 
     if (this.provider === "gemini") {
       this.gemini = new GoogleGenAI({ apiKey });
