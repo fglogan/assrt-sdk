@@ -16,6 +16,21 @@
  *   1. ASSRT_ABP_PYTHON env var (explicit path to a python with ai_browser_profile installed)
  *   2. `python3` on PATH (must have `pip install ai-browser-profile`)
  *
+ * Required Python deps in the resolved interpreter (gotchas the friendly
+ * "module not found" hint does NOT cover, because they trip later):
+ *   - websocket-client  → all three kinds use it for CDP injection over WS
+ *   - cryptography      → Chromium Keychain decrypt
+ *   - pycryptodome      → Chromium AES-CBC fallback
+ *   - plyvel            → LevelDB reader, required for localstorage + indexeddb
+ *                         (cookies path doesn't need it). plyvel doesn't build
+ *                         on Python 3.14 yet; use 3.12 if you need localstorage
+ *                         or indexeddb seeding.
+ *
+ * Exit-code semantics: rc=0 → injected ≥1 record; rc=2 → ran cleanly but
+ * matched 0 records (e.g. domain filter had no hits); rc=1 → real error.
+ * seed() reports ok=true only on rc=0 — callers wanting "no work" vs
+ * "failure" must inspect returncode + stdout.
+ *
  * Mirrors the Fazm browser-harness wrapper at
  * fazm/acp-bridge/browser-harness-server.py (bh_seed_cookies/localstorage/indexeddb).
  */
