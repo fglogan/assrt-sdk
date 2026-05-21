@@ -1203,16 +1203,16 @@ if (process.env.GEMINI_API_KEY) {
 
 server.tool(
   "assrt_open_session",
-  "Open a managed Chrome browser session. Returns a CDP endpoint that subsequent assrt_navigate, assrt_screenshot, assrt_seed_*, and assrt_test calls will reuse. Idempotent: if a session is already open it is returned as-is.",
+  "Open a managed Chrome browser session. Returns a CDP endpoint that subsequent assrt_navigate, assrt_screenshot, assrt_seed_*, and assrt_test calls will reuse. Idempotent: if a session is already open it is returned as-is. Defaults to a visible (headed) Chrome window so the desktop user can watch what the agent is doing; pass headed: false for unattended/CI runs.",
   {
-    headed: z.boolean().optional().describe("Launch a visible browser window. Defaults to false (headless)."),
+    headed: z.boolean().optional().describe("Launch a visible browser window. Defaults to true (visible). Pass false only for unattended/CI runs."),
     managed: z.boolean().optional().describe("When true (default), spawn a real Chrome with an externally reachable CDP port — required for assrt_seed_* tools. When false, Playwright launches its private Chromium with no CDP exposure."),
   },
   async ({ headed, managed }) => {
     try {
       if (!sharedBrowser) sharedBrowser = new McpBrowserManager();
       const reused = await sharedBrowser.launchLocal(
-        undefined, headed, false, false, undefined, managed ?? true,
+        undefined, headed ?? true, false, false, undefined, managed ?? true,
       );
       const cdpUrl = sharedBrowser.getCdpUrl();
       const payload = {
@@ -1269,7 +1269,10 @@ server.tool(
     try {
       if (!sharedBrowser) {
         sharedBrowser = new McpBrowserManager();
-        await sharedBrowser.launchLocal(undefined, false, false, false, undefined, true);
+        // Default to headed when auto-opening from navigate so the desktop
+        // user sees the Chrome window the agent is driving. Matches the
+        // assrt_open_session default.
+        await sharedBrowser.launchLocal(undefined, true, false, false, undefined, true);
       }
       const snapshot = await sharedBrowser.navigate(url);
       return { content: [{ type: "text", text: snapshot }] };
