@@ -129,10 +129,15 @@ function cleanSingletonLocks(userDataDir: string): void {
   }
 }
 
-/** Launch a managed Chrome. If one is already running on the requested port, attach to it. */
+/** Launch a managed Chrome. If one is already running on the requested port, attach to it.
+ *  Profile resolution order: explicit opts.userDataDir > ASSRT_MANAGED_USER_DATA_DIR env > DEFAULT_MANAGED_USER_DATA_DIR.
+ *  The env var lets a host process (e.g. the Fazm desktop bundle) point assrt at a
+ *  shared profile so cookies imported by other Fazm components show up here too. */
 export async function launchManagedChrome(opts: ManagedChromeOptions = {}): Promise<ManagedChromeHandle> {
   const port = opts.port ?? DEFAULT_MANAGED_PORT;
-  const userDataDir = opts.userDataDir ?? DEFAULT_MANAGED_USER_DATA_DIR;
+  const envProfile = process.env.ASSRT_MANAGED_USER_DATA_DIR?.trim();
+  const userDataDir = opts.userDataDir
+    ?? (envProfile && envProfile.length > 0 ? envProfile : DEFAULT_MANAGED_USER_DATA_DIR);
   const headed = opts.headed ?? false;
   const startupTimeoutMs = opts.startupTimeoutMs ?? 30_000;
 
