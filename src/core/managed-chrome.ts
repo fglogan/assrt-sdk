@@ -171,6 +171,12 @@ export async function launchManagedChrome(opts: ManagedChromeOptions = {}): Prom
   mkdirSync(userDataDir, { recursive: true });
   cleanSingletonLocks(userDataDir);
 
+  // First-launch window default. Only applied when this profile has no
+  // Preferences yet — i.e. brand-new install / fresh user-data-dir. After
+  // Chrome creates Preferences and starts persisting browser.window_placement,
+  // we stop passing these flags so the user's manual resizes survive.
+  const isFirstLaunch = !existsSync(join(userDataDir, "Default", "Preferences"));
+
   const args = [
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${userDataDir}`,
@@ -187,6 +193,9 @@ export async function launchManagedChrome(opts: ManagedChromeOptions = {}): Prom
     "--password-store=basic",
     "--use-mock-keychain",
   ];
+  if (isFirstLaunch) {
+    args.push("--window-position=22,30", "--window-size=1134,1112");
+  }
   if (!headed) args.push("--headless=new");
 
   console.error(`[managed-chrome] spawning ${chromeBin} port=${port} headed=${headed} userDataDir=${userDataDir}`);
