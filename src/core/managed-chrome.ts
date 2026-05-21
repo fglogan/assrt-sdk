@@ -37,11 +37,16 @@ const CHROME_BIN_CANDIDATES = [
   "/usr/bin/chromium-browser",
 ];
 
-export const DEFAULT_MANAGED_PORT = 9655;
+// Use a port distinct from Fazm browser-harness's 9655 so assrt-mcp never
+// piggybacks on an already-running browser-harness Chrome. Assrt owns its
+// own browser + profile end-to-end; the host (Fazm) is responsible for
+// mirroring cookies into both profiles if it wants them shared.
+export const DEFAULT_MANAGED_PORT = 9755;
 export const DEFAULT_MANAGED_USER_DATA_DIR = join(homedir(), ".assrt", "managed-chrome");
 
 export interface ManagedChromeOptions {
-  /** Remote debugging port. Default: 9655 (matches Fazm browser-harness). */
+  /** Remote debugging port. Default: 9755 (assrt-only; deliberately distinct
+   *  from Fazm browser-harness's 9655 so we never attach to its Chrome). */
   port?: number;
   /** User data directory. Default: ~/.assrt/managed-chrome. */
   userDataDir?: string;
@@ -129,10 +134,12 @@ function cleanSingletonLocks(userDataDir: string): void {
   }
 }
 
-/** Launch a managed Chrome. If one is already running on the requested port, attach to it.
+/** Launch a managed Chrome. If one is already running on the requested port, attach to it
+ *  (this only catches our OWN prior assrt instance on port 9755; browser-harness lives
+ *  on a different port so we never reuse its Chrome).
  *  Profile resolution order: explicit opts.userDataDir > ASSRT_MANAGED_USER_DATA_DIR env > DEFAULT_MANAGED_USER_DATA_DIR.
- *  The env var lets a host process (e.g. the Fazm desktop bundle) point assrt at a
- *  shared profile so cookies imported by other Fazm components show up here too. */
+ *  The env var is an advanced override; the default Fazm wiring leaves it unset
+ *  so assrt always uses its own dedicated ~/.assrt/managed-chrome profile. */
 export async function launchManagedChrome(opts: ManagedChromeOptions = {}): Promise<ManagedChromeHandle> {
   const port = opts.port ?? DEFAULT_MANAGED_PORT;
   const envProfile = process.env.ASSRT_MANAGED_USER_DATA_DIR?.trim();
