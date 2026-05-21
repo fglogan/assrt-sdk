@@ -172,9 +172,9 @@ export async function launchManagedChrome(opts: ManagedChromeOptions = {}): Prom
   cleanSingletonLocks(userDataDir);
 
   // First-launch window default. Only applied when this profile has no
-  // Preferences yet — i.e. brand-new install / fresh user-data-dir. After
-  // Chrome creates Preferences and starts persisting browser.window_placement,
-  // we stop passing these flags so the user's manual resizes survive.
+  // Preferences yet (brand-new install / fresh user-data-dir). After Chrome
+  // creates Preferences and starts persisting browser.window_placement, we
+  // stop passing these flags so the user's manual resizes survive.
   const isFirstLaunch = !existsSync(join(userDataDir, "Default", "Preferences"));
 
   const args = [
