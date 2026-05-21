@@ -1192,6 +1192,124 @@ if (process.env.GEMINI_API_KEY) {
   console.error("[assrt-mcp] assrt_analyze_video tool skipped (GEMINI_API_KEY not set)");
 }
 
+// ── Phase 3: freeform browser control ──
+//
+// Exposes the same primitives assrt_test uses internally (open browser, navigate,
+// screenshot, close) as standalone MCP tools, so coding agents can drive a
+// managed Chrome interactively instead of only via scripted scenarios. Shares
+// the `sharedBrowser` singleton with assrt_test, so an agent can open a session,
+// run assrt_seed_* against it, then call assrt_test/plan and reuse the same
+// browser without re-launching.
+
+server.tool(
+  "assrt_open_session",
+  "Open a managed Chrome browser session. Returns a CDP endpoint that subsequent assrt_navigate, assrt_screenshot, assrt_seed_*, and assrt_test calls will reuse. Idempotent: if a session is already open it is returned as-is.",
+  {
+    headed: z.boolean().optional().describe("Launch a visible browser window. Defaults to false (headless)."),
+    managed: z.boolean().optional().describe("When true (default), spawn a real Chrome with an externally reachable CDP port — required for assrt_seed_* tools. When false, Playwright launches its private Chromium with no CDP exposure."),
+  },
+  async ({ headed, managed }) => {
+    try {
+      if (!sharedBrowser) sharedBrowser = new McpBrowserManager();
+      const reused = await sharedBrowser.launchLocal(
+        undefined, headed, false, false, undefined, managed ?? true,
+      );
+      const cdpUrl = sharedBrowser.getCdpUrl();
+      const payload = {
+        ok: true,
+        reused,
+        cdpUrl,
+        headed: !!headed,
+        managed: managed ?? true,
+      };
+      return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
+    } catch (err) {
+      const e = err as Error;
+      if (e instanceof ExtensionTokenRequired) {
+        return { content: [{ type: "text", text: e.message }], isError: true };
+      }
+      return {
+        content: [{ type: "text", text: `assrt_open_session failed: ${e.message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  "assrt_close_session",
+  "Close the managed Chrome session opened by assrt_open_session. No-op if no session is open. Pass keepBrowserOpen: true to detach without killing Chrome (useful when the user wants to continue browsing manually).",
+  {
+    keepBrowserOpen: z.boolean().optional().describe("Detach from the browser without killing it. Defaults to false."),
+  },
+  async ({ keepBrowserOpen }) => {
+    if (!sharedBrowser) {
+      return { content: [{ type: "text", text: JSON.stringify({ ok: true, hadSession: false }) }] };
+    }
+    try {
+      await sharedBrowser.close({ keepBrowserOpen });
+      sharedBrowser = null;
+      return { content: [{ type: "text", text: JSON.stringify({ ok: true, hadSession: true, keptOpen: !!keepBrowserOpen }) }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `assrt_close_session failed: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  "assrt_navigate",
+  "Navigate the active managed Chrome session to a URL. Auto-opens a session if none exists. Returns the page accessibility snapshot.",
+  {
+    url: z.string().describe("Destination URL (e.g. https://example.com or http://localhost:5173)."),
+  },
+  async ({ url }) => {
+    try {
+      if (!sharedBrowser) {
+        sharedBrowser = new McpBrowserManager();
+        await sharedBrowser.launchLocal(undefined, false, false, false, undefined, true);
+      }
+      const snapshot = await sharedBrowser.navigate(url);
+      return { content: [{ type: "text", text: snapshot }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `assrt_navigate failed: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  "assrt_screenshot",
+  "Capture a screenshot of the active managed Chrome page. Returns a JPEG as an MCP image content block. Requires an open session (call assrt_open_session or assrt_navigate first).",
+  {},
+  async () => {
+    if (!sharedBrowser) {
+      return {
+        content: [{ type: "text", text: "assrt_screenshot: no active session. Call assrt_open_session or assrt_navigate first." }],
+        isError: true,
+      };
+    }
+    try {
+      const b64 = await sharedBrowser.screenshot();
+      if (!b64) {
+        return { content: [{ type: "text", text: "assrt_screenshot: capture returned no image data." }], isError: true };
+      }
+      return { content: [{ type: "image", data: b64, mimeType: "image/jpeg" }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `assrt_screenshot failed: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+console.error("[assrt-mcp] Phase 3 tools registered: assrt_open_session, assrt_close_session, assrt_navigate, assrt_screenshot");
+
 // ── Start ──
 
 async function main() {
