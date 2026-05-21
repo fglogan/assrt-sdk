@@ -673,27 +673,47 @@ export class McpBrowserManager {
   }
 
   async screenshot(): Promise<string | null> {
+    const tCapture = Date.now();
     const result = await this.callTool("browser_take_screenshot", { type: "jpeg", quality: 50 });
     // In normal mode, the result contains inline base64 image data
     for (const content of result.content || []) {
       if (content.type === "image") return content.data || null;
     }
-    // In file output mode, the result contains a text reference to a .jpeg file
-    if (this.outputDir) {
-      const text = extractText(result);
-      const match = text.match(/([^\s"]+\.(?:jpeg|jpg|png))/i);
-      if (match) {
-        const filePath = match[1];
-        const { readFileSync } = await import("fs");
-        const { resolve } = await import("path");
-        const fullPath = filePath.startsWith("/") ? filePath : resolve(this.outputDir, filePath);
-        try {
-          return readFileSync(fullPath).toString("base64");
-        } catch {
-          // File not found, fall through
-        }
-      }
+    if (!this.outputDir) return null;
+
+    const { readFileSync, readdirSync, statSync } = await import("fs");
+    const { resolve, join: pathJoin } = await import("path");
+
+    // In file output mode, the result text references a .jpeg file. Try the
+    // regex extraction first.
+    const text = extractText(result);
+    const match = text.match(/([^\s"]+\.(?:jpeg|jpg|png))/i);
+    if (match) {
+      const filePath = match[1];
+      const fullPath = filePath.startsWith("/") ? filePath : resolve(this.outputDir, filePath);
+      try {
+        return readFileSync(fullPath).toString("base64");
+      } catch { /* fall through to newest-file scan */ }
     }
+
+    // Fallback: Playwright MCP's output format changes between versions. Find
+    // the newest .jpeg/.png written since we issued the capture and return it.
+    try {
+      const files = readdirSync(this.outputDir)
+        .filter((f) => /\.(jpe?g|png)$/i.test(f))
+        .map((f) => {
+          const full = pathJoin(this.outputDir!, f);
+          let mtime = 0;
+          try { mtime = statSync(full).mtimeMs; } catch { /* skipped */ }
+          return { full, mtime };
+        })
+        .filter((e) => e.mtime >= tCapture - 1000)
+        .sort((a, b) => b.mtime - a.mtime);
+      if (files.length > 0) {
+        return readFileSync(files[0].full).toString("base64");
+      }
+    } catch { /* directory unreadable */ }
+
     return null;
   }
 
