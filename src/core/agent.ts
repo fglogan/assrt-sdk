@@ -7,7 +7,9 @@ import type { TestStep, TestAssertion, ScenarioResult, TestReport, TestRunOption
 const MAX_STEPS_PER_SCENARIO = Infinity;
 const MAX_CONVERSATION_TURNS = Infinity;
 const DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001";
-const DEFAULT_GEMINI_MODEL = "gemini-3.1-pro-preview";
+// Default to Gemini Flash (latest) instead of Pro so cost/latency match Anthropic's
+// Haiku default. Override via `GEMINI_MODEL` env or the per-tool `model` arg.
+const DEFAULT_GEMINI_MODEL = "gemini-flash-latest";
 
 type Provider = "anthropic" | "gemini";
 
@@ -318,8 +320,8 @@ export class TestAgent {
   private tempEmail: DisposableEmail | null = null;
   private discoveredUrls: Set<string> = new Set();
   private activeDiscoveries = 0;
-  private model: string;
-  private provider: Provider;
+  public model: string;
+  public provider: Provider;
   private browserBusy = false;
   private pendingDiscoveryUrls: string[] = [];
   private broadcastFrame: ((jpeg: Buffer) => void) | null = null;
