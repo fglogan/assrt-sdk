@@ -31,6 +31,27 @@ import { seed as runSeed, type SeedKind } from "../core/seed";
 // ── Singleton browser instance (reused across assrt_test calls) ──
 let sharedBrowser: McpBrowserManager | null = null;
 
+// Build an Anthropic client from a resolved credential, honoring its type.
+// assrt_plan / assrt_diagnose talk to Anthropic directly (not via TestAgent),
+// so they need this. assrt_test goes through TestAgent which handles all
+// providers itself. Gemini credentials are rejected here with a clear message
+// because the direct-Anthropic plan/diagnose paths have no Gemini branch yet —
+// only assrt_test supports Gemini. (Anthropic auth: OAuth tokens use authToken +
+// the oauth beta header; plain API keys use the apiKey field.)
+async function anthropicFromCredential(credential: { token: string; type: "oauth" | "apiKey"; provider: "anthropic" | "gemini" }) {
+  if (credential.provider !== "anthropic") {
+    throw new Error(
+      `This tool currently requires Anthropic credentials (found '${credential.provider}'). ` +
+      `assrt_test supports Gemini, but assrt_plan/assrt_diagnose do not yet. ` +
+      `Set ANTHROPIC_API_KEY or sign into Claude Code.`
+    );
+  }
+  const Anthropic = (await import("@anthropic-ai/sdk")).default;
+  return credential.type === "oauth"
+    ? new Anthropic({ authToken: credential.token, defaultHeaders: { "anthropic-beta": "oauth-2025-04-20" } })
+    : new Anthropic({ apiKey: credential.token });
+}
+
 // ── Video player HTML generator ──
 
 function generateVideoPlayerHtml(
@@ -816,12 +837,7 @@ server.tool(
   async ({ url, model }) => {
     const t0 = Date.now();
     const credential = getCredential();
-    const Anthropic = (await import("@anthropic-ai/sdk")).default;
-
-    const anthropic = new Anthropic({
-      authToken: credential.token,
-      defaultHeaders: { "anthropic-beta": "oauth-2025-04-20" },
-    });
+    const anthropic = await anthropicFromCredential(credential);
 
     const browser = new McpBrowserManager();
     try {
@@ -915,12 +931,7 @@ server.tool(
   async ({ url, scenario, error }) => {
     const t0 = Date.now();
     const credential = getCredential();
-    const Anthropic = (await import("@anthropic-ai/sdk")).default;
-
-    const anthropic = new Anthropic({
-      authToken: credential.token,
-      defaultHeaders: { "anthropic-beta": "oauth-2025-04-20" },
-    });
+    const anthropic = await anthropicFromCredential(credential);
 
     const debugPrompt = `## Failed Test Report
 
