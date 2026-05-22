@@ -32,25 +32,43 @@ import { seed as runSeed, type SeedKind } from "../core/seed";
 let sharedBrowser: McpBrowserManager | null = null;
 
 // Build an Anthropic client from a resolved credential, honoring its type.
-// assrt_plan / assrt_diagnose talk to Anthropic directly (not via TestAgent),
-// so they need this. assrt_test goes through TestAgent which handles all
-// providers itself. Gemini credentials are rejected here with a clear message
-// because the direct-Anthropic plan/diagnose paths have no Gemini branch yet —
-// only assrt_test supports Gemini. (Anthropic auth: OAuth tokens use authToken +
-// the oauth beta header; plain API keys use the apiKey field.)
+// (Anthropic auth: OAuth tokens use authToken + the oauth beta header; plain
+// API keys use the apiKey field.)
 async function anthropicFromCredential(credential: { token: string; type: "oauth" | "apiKey"; provider: "anthropic" | "gemini" }) {
   if (credential.provider !== "anthropic") {
     throw new Error(
-      `assrt_plan and assrt_diagnose currently require Anthropic credentials (found '${credential.provider}'). ` +
-      `assrt_test already supports Gemini. ` +
-      `To unblock plan/diagnose: switch Fazm's model to Claude (ASSRT_PROVIDER=anthropic) so Claude Code OAuth is used, ` +
-      `or sign into Claude Code (\`claude\` in terminal) if you haven't yet.`
+      `Expected Anthropic credential, got '${credential.provider}'. ` +
+      `This is a bug in the provider-aware dispatch in assrt_plan/assrt_diagnose.`
     );
   }
   const Anthropic = (await import("@anthropic-ai/sdk")).default;
   return credential.type === "oauth"
     ? new Anthropic({ authToken: credential.token, defaultHeaders: { "anthropic-beta": "oauth-2025-04-20" } })
     : new Anthropic({ apiKey: credential.token });
+}
+
+// Build a Gemini client from a resolved credential. Used by assrt_plan and
+// assrt_diagnose when the user has Gemini selected in Fazm (ASSRT_PROVIDER=gemini)
+// so we don't force them through an Anthropic key they don't have.
+async function geminiFromCredential(credential: { token: string; type: "oauth" | "apiKey"; provider: "anthropic" | "gemini" }) {
+  if (credential.provider !== "gemini") {
+    throw new Error(
+      `Expected Gemini credential, got '${credential.provider}'. ` +
+      `This is a bug in the provider-aware dispatch in assrt_plan/assrt_diagnose.`
+    );
+  }
+  const { GoogleGenAI } = await import("@google/genai");
+  return new GoogleGenAI({ apiKey: credential.token });
+}
+
+// Default models per provider for assrt_plan / assrt_diagnose. Anthropic stays
+// on Haiku (cheap + fast). Gemini defaults to Flash (cheap + fast). When the
+// user passes an explicit `model` arg, we honor it as-is regardless of provider.
+const DEFAULT_ANTHROPIC_PLAN_MODEL = "claude-haiku-4-5-20251001";
+const DEFAULT_GEMINI_PLAN_MODEL = "gemini-flash-latest";
+
+function defaultModelFor(provider: "anthropic" | "gemini"): string {
+  return provider === "gemini" ? DEFAULT_GEMINI_PLAN_MODEL : DEFAULT_ANTHROPIC_PLAN_MODEL;
 }
 
 // ── Video player HTML generator ──
@@ -839,7 +857,7 @@ server.tool(
   async ({ url, model }) => {
     const t0 = Date.now();
     const credential = getCredential();
-    const anthropic = await anthropicFromCredential(credential);
+    const resolvedModel = model || defaultModelFor(credential.provider);
 
     const browser = new McpBrowserManager();
     try {
@@ -867,39 +885,59 @@ server.tool(
 
       const allText = [snapshotText1, snapshotText2, snapshotText3].join("\n\n").slice(0, 8000);
 
-      server.server.sendLoggingMessage({ level: "info", data: "Generating test plan with AI..." });
+      server.server.sendLoggingMessage({ level: "info", data: `Generating test plan with ${credential.provider} (${resolvedModel})...` });
 
-      // Build message content with screenshots
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const contentParts: any[] = [];
-      for (const img of [screenshot1, screenshot2, screenshot3]) {
-        if (img) {
+      const userText = `Analyze this web application and generate a comprehensive test plan.\n\n**URL:** ${url}\n\n**Visible Text Content:**\n${allText}\n\nBased on the screenshots and page analysis above, generate comprehensive test cases for this web application.`;
+      const screenshots = [screenshot1, screenshot2, screenshot3].filter((s): s is string => !!s);
+
+      let plan: string;
+      if (credential.provider === "gemini") {
+        const gemini = await geminiFromCredential(credential);
+        const parts: Array<Record<string, unknown>> = [];
+        for (const img of screenshots) {
+          parts.push({ inlineData: { mimeType: "image/jpeg", data: img } });
+        }
+        parts.push({ text: userText });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const response = await (gemini.models as any).generateContent({
+          model: resolvedModel,
+          contents: [{ role: "user", parts }],
+          config: { systemInstruction: PLAN_SYSTEM_PROMPT },
+        });
+        const candidate = response?.candidates?.[0];
+        plan = (candidate?.content?.parts || [])
+          .filter((p: { text?: string }) => typeof p.text === "string")
+          .map((p: { text: string }) => p.text)
+          .join("");
+      } else {
+        const anthropic = await anthropicFromCredential(credential);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const contentParts: any[] = [];
+        for (const img of screenshots) {
           contentParts.push({
             type: "image",
             source: { type: "base64", media_type: "image/jpeg", data: img },
           });
         }
+        contentParts.push({ type: "text", text: userText });
+
+        const response = await anthropic.messages.create({
+          model: resolvedModel,
+          max_tokens: 4096,
+          system: PLAN_SYSTEM_PROMPT,
+          messages: [{ role: "user", content: contentParts }],
+        });
+
+        plan = response.content
+          .filter((b) => b.type === "text")
+          .map((b) => (b as { type: "text"; text: string }).text)
+          .join("");
       }
-      contentParts.push({
-        type: "text",
-        text: `Analyze this web application and generate a comprehensive test plan.\n\n**URL:** ${url}\n\n**Visible Text Content:**\n${allText}\n\nBased on the screenshots and page analysis above, generate comprehensive test cases for this web application.`,
-      });
-
-      const response = await anthropic.messages.create({
-        model: model || "claude-haiku-4-5-20251001",
-        max_tokens: 4096,
-        system: PLAN_SYSTEM_PROMPT,
-        messages: [{ role: "user", content: contentParts }],
-      });
-
-      const plan = response.content
-        .filter((b) => b.type === "text")
-        .map((b) => (b as { type: "text"; text: string }).text)
-        .join("");
 
       trackEvent("assrt_plan_run", {
         url,
-        model: model || "default",
+        model: resolvedModel,
+        provider: credential.provider,
         duration_s: +((Date.now() - t0) / 1000).toFixed(1),
         source: "mcp",
       });
@@ -933,7 +971,7 @@ server.tool(
   async ({ url, scenario, error }) => {
     const t0 = Date.now();
     const credential = getCredential();
-    const anthropic = await anthropicFromCredential(credential);
+    const resolvedModel = defaultModelFor(credential.provider);
 
     const debugPrompt = `## Failed Test Report
 
@@ -947,20 +985,38 @@ ${error}
 
 Please diagnose this failure and provide a corrected test scenario.`;
 
-    const response = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 4096,
-      system: DIAGNOSE_SYSTEM_PROMPT,
-      messages: [{ role: "user", content: debugPrompt }],
-    });
-
-    const diagnosis = response.content
-      .filter((b) => b.type === "text")
-      .map((b) => (b as { type: "text"; text: string }).text)
-      .join("");
+    let diagnosis: string;
+    if (credential.provider === "gemini") {
+      const gemini = await geminiFromCredential(credential);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (gemini.models as any).generateContent({
+        model: resolvedModel,
+        contents: [{ role: "user", parts: [{ text: debugPrompt }] }],
+        config: { systemInstruction: DIAGNOSE_SYSTEM_PROMPT },
+      });
+      const candidate = response?.candidates?.[0];
+      diagnosis = (candidate?.content?.parts || [])
+        .filter((p: { text?: string }) => typeof p.text === "string")
+        .map((p: { text: string }) => p.text)
+        .join("");
+    } else {
+      const anthropic = await anthropicFromCredential(credential);
+      const response = await anthropic.messages.create({
+        model: resolvedModel,
+        max_tokens: 4096,
+        system: DIAGNOSE_SYSTEM_PROMPT,
+        messages: [{ role: "user", content: debugPrompt }],
+      });
+      diagnosis = response.content
+        .filter((b) => b.type === "text")
+        .map((b) => (b as { type: "text"; text: string }).text)
+        .join("");
+    }
 
     trackEvent("assrt_diagnose_run", {
       url,
+      model: resolvedModel,
+      provider: credential.provider,
       duration_s: +((Date.now() - t0) / 1000).toFixed(1),
       source: "mcp",
     });
@@ -969,7 +1025,7 @@ Please diagnose this failure and provide a corrected test scenario.`;
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify({ diagnosis, url, scenario }, null, 2),
+          text: JSON.stringify({ diagnosis, url, scenario, model: resolvedModel, provider: credential.provider }, null, 2),
         },
       ],
     };
