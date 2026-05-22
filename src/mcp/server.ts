@@ -41,9 +41,10 @@ let sharedBrowser: McpBrowserManager | null = null;
 async function anthropicFromCredential(credential: { token: string; type: "oauth" | "apiKey"; provider: "anthropic" | "gemini" }) {
   if (credential.provider !== "anthropic") {
     throw new Error(
-      `This tool currently requires Anthropic credentials (found '${credential.provider}'). ` +
-      `assrt_test supports Gemini, but assrt_plan/assrt_diagnose do not yet. ` +
-      `Set ANTHROPIC_API_KEY or sign into Claude Code.`
+      `assrt_plan and assrt_diagnose currently require Anthropic credentials (found '${credential.provider}'). ` +
+      `assrt_test already supports Gemini. ` +
+      `To unblock plan/diagnose: switch Fazm's model to Claude (ASSRT_PROVIDER=anthropic) so Claude Code OAuth is used, ` +
+      `or sign into Claude Code (\`claude\` in terminal) if you haven't yet.`
     );
   }
   const Anthropic = (await import("@anthropic-ai/sdk")).default;
