@@ -372,7 +372,7 @@ server.tool(
       z.object({ width: z.number(), height: z.number() }).describe("Explicit viewport dimensions"),
     ]).optional().describe("Browser viewport size. Pass a preset string ('mobile', 'desktop') or explicit {width, height}."),
     tags: z.array(z.string()).optional().describe("Tags for organizing scenarios (e.g. ['smoke', 'checkout', 'regression']). Saved with the scenario for filtering."),
-    model: z.string().optional().describe("LLM model override (default: claude-haiku-4-5-20251001)"),
+    model: z.string().optional().describe("LLM model override. Default depends on provider: claude-haiku-4-5-20251001 for Anthropic, gemini-flash-latest for Gemini."),
     autoOpenPlayer: z.boolean().optional().describe("Auto-open the video player in the browser when test completes (default: true)"),
     headed: z.boolean().optional().describe("Launch a visible (headed) browser window instead of headless. Defaults to headless, or the ASSRT_HEADED env var if set."),
     isolated: z.boolean().optional().describe("When true, keep the browser profile in memory only (no disk persistence). When false (default), persist cookies, localStorage, and logins to ~/.assrt/browser-profile across test runs."),
@@ -786,7 +786,7 @@ server.tool(
       saveScenarioRun(resolvedScenarioId, {
         planSnapshot: resolvedPlan,
         url,
-        model: model || "claude-haiku-4-5-20251001",
+        model: agent.model,
         status: report.failedCount === 0 ? "passed" : "failed",
         passedCount: report.passedCount,
         failedCount: report.failedCount,
@@ -811,7 +811,8 @@ server.tool(
 
     trackEvent("assrt_test_run", {
       url,
-      model: model || "default",
+      model: agent.model,
+      provider: agent.provider,
       passed: report.failedCount === 0,
       passedCount: report.passedCount,
       failedCount: report.failedCount,
