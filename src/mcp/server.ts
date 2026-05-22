@@ -527,7 +527,7 @@ server.tool(
       managed ??
       (process.env.ASSRT_MANAGED_CHROME === "1" || process.env.ASSRT_MANAGED_CHROME === "true") ??
       !!sharedBrowser?.getCdpUrl();
-    const agent = new TestAgent(credential.token, emit, model, "anthropic", null, agentMode, credential.type, videoDir, headedResolved, isolatedResolved, agentMode === "local" ? sharedBrowser! : undefined, extensionResolved, extensionToken, managedResolved);
+    const agent = new TestAgent(credential.token, emit, model, credential.provider, null, agentMode, credential.type, videoDir, headedResolved, isolatedResolved, agentMode === "local" ? sharedBrowser! : undefined, extensionResolved, extensionToken, managedResolved);
 
     // Ensure the browser is launched before starting video recording.
     // agent.run() calls launchLocal() internally, but we need the browser connected
