@@ -28,7 +28,7 @@ function printUsage(): void {
     "  --url         URL to test (required)\n" +
     "  --plan        Test scenarios as inline text\n" +
     "  --plan-file   Path to a file containing test scenarios\n" +
-    "  --model       LLM model to use (default: claude-haiku-4-5-20251001)\n" +
+    "  --model       LLM model to use. Default depends on provider: claude-haiku-4-5-20251001 (Anthropic) or gemini-flash-latest (Gemini)\n" +
     "  --headed      Launch a visible browser window (default: headless)\n" +
     "  --isolated    Keep browser profile in memory only (default: persist to ~/.assrt/browser-profile)\n" +
     "  --keep-open   Leave the browser window open after the test finishes\n" +
