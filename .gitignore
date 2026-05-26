@@ -1,6 +1,7 @@
 node_modules/
 dist/
 npm/*.mjs
+npm/*.tgz
 npm/mcp/
 scripts/
 .env*
